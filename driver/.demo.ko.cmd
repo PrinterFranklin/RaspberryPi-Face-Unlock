@@ -1,0 +1,1 @@
+cmd_/home/nbztx/Downloads/last2/driver/demo.ko := arm-linux-gnueabihf-ld -EL -r  -T ./scripts/module-common.lds --build-id  -o /home/nbztx/Downloads/last2/driver/demo.ko /home/nbztx/Downloads/last2/driver/demo.o /home/nbztx/Downloads/last2/driver/demo.mod.o

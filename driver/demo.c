@@ -1,0 +1,212 @@
+#include <linux/init.h>
+#include <linux/module.h>
+#include <linux/device.h>
+#include <linux/gpio.h>
+#include <linux/interrupt.h>
+#include <linux/cdev.h>
+#include <linux/ioctl.h>
+#include <linux/fs.h>
+#include <linux/delay.h>
+#include <asm/uaccess.h>
+#define DRIVER_NAME "Demo"
+#define DEVICE_NAME "Demo"
+
+static dev_t demo_devno; //设备号
+static struct class *demo_class;
+static struct cdev demo_dev;
+
+
+static struct gpio_config{
+	int sensor_num;	//人体传感器
+	int light_num;  //光敏传感器
+	int led_num;	//指示灯
+	int button_num;
+	int button_flag;
+}config;
+
+static int flag = 0;    //指示gpio端口是否被占用的标志位
+
+//open 函数，应用程序调用open系统调用时会调用本函数
+static int demo_open(struct inode *inode, struct file *filp)
+{
+	printk(KERN_INFO"Demo open\n");
+	return 0;
+}
+
+//release 函数，应用程序调用close系统调用时会调用本函数
+static int demo_release(struct inode *inode, struct file *filp)
+{	
+	if(flag){
+		gpio_free(config.light_num);
+		gpio_free(config.sensor_num);
+		gpio_free(config.led_num);
+		gpio_free(config.button_num);
+		flag = 0;
+	}
+	printk(KERN_INFO"Demo release\n");
+	return 0;
+}
+
+//ioctl 控制函数，应用程序调用ioctl系统调用时会调用本函数
+static long demo_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+	int err = 0;   //指示是否有错
+	switch(cmd){
+		case 0://0 表示命令号，一般都用宏定义来控制
+			{
+				if(copy_from_user(&config,(void *)arg,sizeof(struct gpio_config))){ //从用户程序中获取配置数据
+					printk(KERN_ERR"[%s %d] : copy_from user failed !\n",__func__,__LINE__);
+					return -EFAULT;
+				}
+				printk(KERN_INFO"[%s %d]: Get light gpio num: %d, sensor gpio num: %d, led gpio num: %d and button gpio num: %d\n ",__func__,__LINE__,config.light_num,config.sensor_num,config.led_num,config.button_num);
+				
+				err = gpio_request_one(config.light_num,GPIOF_IN,"Light Button");
+				if(err){
+					printk(KERN_ERR"[%s %d]:Request light button gpio failed\n",__func__,__LINE__);
+					return -EFAULT;
+				}
+
+				err = gpio_request_one(config.sensor_num,GPIOF_IN,"Sensor Button");
+				if(err){
+					printk(KERN_ERR"[%s %d]:Request sensor button gpio failed\n",__func__,__LINE__);
+					gpio_free(config.light_num);
+					return -EFAULT;
+				}
+
+				err = gpio_request_one(config.led_num,GPIOF_OUT_INIT_LOW,"LED light");
+				if(err){
+					printk(KERN_ERR"[%s %d]:Request led gpio failed\n",__func__,__LINE__);
+					gpio_free(config.light_num);
+					gpio_free(config.sensor_num);
+					return -EFAULT;
+				}
+
+				err = gpio_request_one(config.button_num,GPIOF_IN,"pushed button");
+				if(err){
+					printk(KERN_ERR"[%s %d]:Request button gpio failed\n",__func__,__LINE__);
+					gpio_free(config.light_num);
+					gpio_free(config.sensor_num);
+					gpio_free(config.button_num);
+					return -EFAULT;
+				}
+				
+				flag = 1;
+				break;
+			}
+		case 1:
+			{
+				gpio_direction_output(config.led_num,0);
+				gpio_direction_input(config.light_num);
+		 		gpio_direction_input(config.sensor_num);
+				gpio_set_value(config.led_num,0);
+				if(gpio_get_value(config.sensor_num)==0 || gpio_get_value(config.light_num)==0)
+				{
+					gpio_set_value(config.led_num,0);
+				}
+				else
+				{
+					gpio_set_value(config.led_num,1);
+				}
+				mdelay(10);					
+		//if(copy_to_user((void *)arg,&config,sizeof(struct gpio_config))){printk(KERN_ERR"[%s %d] : copy to user failed !\n",__func__,__LINE__);
+					//return -EFAULT;
+				//}
+				flag = 1;	
+				break;
+			}
+
+		case 3:
+			{
+				mdelay(120);
+
+				if(!gpio_get_value(config.button_num)) {
+					mdelay(10);					
+					config.button_flag = 1;
+				}
+				else {
+					mdelay(10);
+					config.button_flag = 0;
+				}
+				if (copy_to_user((void *)arg,&config,sizeof(struct gpio_config))) {
+					printk(KERN_ERR"[%s %d] : copy to user failed !\n",__func__,__LINE__);
+					return -EFAULT;
+				}
+				flag = 1;
+				break;
+			}
+
+		default:
+			printk(KERN_INFO"[%s %d]:Invalid cmd", __func__,__LINE__);
+			break;
+	}
+	return 0;
+}
+
+
+
+static struct file_operations demo_fops = {
+	.owner = THIS_MODULE,
+	.open  = demo_open,
+	.release  = demo_release,
+	.unlocked_ioctl = demo_ioctl,
+};
+
+
+static int __init demo_init(void)
+{
+	int err;
+
+	printk(KERN_INFO"Demo Init \n");
+
+	err = alloc_chrdev_region(&demo_devno,0,1,DRIVER_NAME);   
+	if(err < 0){
+		goto ERR;
+	}
+	cdev_init(&demo_dev,&demo_fops);
+
+	err = cdev_add(&demo_dev,demo_devno,1);
+
+	if(err < 0)
+	{
+		printk(KERN_ERR"[%s,%d]add cdev failed\n",__func__,__LINE__);
+		goto FREE_DEVNO;
+	}
+	//自动生成设备文件 在/dev目录下，文件名为DEVICE_NAME
+	demo_class = class_create(THIS_MODULE,DEVICE_NAME);
+	if(IS_ERR(demo_class))
+	{
+		printk(KERN_ERR"[%s,%d]class create failed\n",__func__,__LINE__);
+		goto DEV_FREE;
+	}
+	device_create(demo_class,NULL,demo_devno,NULL,DEVICE_NAME);
+
+	return 0;
+DEV_FREE:
+	cdev_del(&demo_dev);
+FREE_DEVNO:
+	unregister_chrdev_region(demo_devno, 1);
+ERR:
+	return err;
+}
+
+
+static void demo_exit(void)
+{
+	if(flag){
+		gpio_free(config.light_num);
+		gpio_free(config.sensor_num);
+		gpio_free(config.led_num);
+		gpio_free(config.button_num);
+	}
+	device_destroy(demo_class,demo_devno);
+	class_destroy(demo_class);
+	cdev_del(&demo_dev);
+	unregister_chrdev_region(demo_devno, 1);
+	printk(KERN_INFO"Demo exit\n");
+}
+
+module_init(demo_init);
+module_exit(demo_exit);
+MODULE_AUTHOR("nbztx");
+MODULE_DESCRIPTION("BUTTON LED Driver");
+MODULE_LICENSE("GPL");
